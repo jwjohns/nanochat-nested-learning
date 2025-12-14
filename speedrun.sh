@@ -48,12 +48,8 @@ python -m nanochat.report reset
 # -----------------------------------------------------------------------------
 # Tokenizer
 
-# Install Rust / Cargo
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-source "$HOME/.cargo/env"
-
-# Build the rustbpe Tokenizer
-uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
+# Tokenizer is now standard GPT-2 (HuggingFace), no training needed.
+# RustBPE steps removed.
 
 # Download the first ~2B characters of pretraining dataset
 # look at dev/repackage_data_reference.py for details on how this data was prepared
@@ -61,14 +57,12 @@ uv run maturin develop --release --manifest-path rustbpe/Cargo.toml
 # so we download 2e9 / 250e6 = 8 data shards at this point
 # each shard is ~100MB of text (compressed), so this is about ~800MB of data on disk
 python -m nanochat.dataset -n 8
-# Immediately also kick off downloading more shards in the background while tokenizer trains
+# Immediately also kick off downloading more shards in the background
 # See comment below for why 240 is the right number here
 python -m nanochat.dataset -n 240 &
 DATASET_DOWNLOAD_PID=$!
-# train the tokenizer with vocab size 2**16 = 65536 on ~2B characters of data
-python -m scripts.tok_train --max_chars=2000000000
-# evaluate the tokenizer (report compression ratio etc.)
-python -m scripts.tok_eval
+# Wait for some data to arrive
+sleep 10
 
 # -----------------------------------------------------------------------------
 # Base model (pretraining)
