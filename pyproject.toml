@@ -47,7 +47,6 @@ python_functions = ["test_*"]
 [tool.uv.sources]
 torch = [  
     { index = "pytorch-cpu", extra = "cpu" },  
-    { index = "pytorch-cu128", extra = "gpu", marker = "platform_machine != 'aarch64'" },
     { index = "pytorch-nightly-cu128", extra = "gpu", marker = "sys_platform == 'linux' and platform_machine == 'aarch64'" },  
 ]
 
