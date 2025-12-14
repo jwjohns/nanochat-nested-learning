@@ -17,15 +17,20 @@ mkdir -p $NANOCHAT_BASE_DIR
 
 # -----------------------------------------------------------------------------
 # Python venv setup with uv
+# (Skipped if running inside Docker container via NANOCHAT_DOCKER env var)
 
-# install uv (if not already installed)
-command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
-# create a .venv local virtual environment (if it doesn't exist)
-[ -d ".venv" ] || uv venv
-# install the repo dependencies
-uv sync --extra gpu
-# activate venv so that `python` uses the project's venv instead of system python
-source .venv/bin/activate
+if [ -z "$NANOCHAT_DOCKER" ]; then
+    # install uv (if not already installed)
+    command -v uv &> /dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
+    # create a .venv local virtual environment (if it doesn't exist)
+    [ -d ".venv" ] || uv venv
+    # install the repo dependencies
+    uv sync --extra gpu
+    # activate venv so that `python` uses the project's venv instead of system python
+    source .venv/bin/activate
+else
+    echo "Running in Docker mode, skipping venv setup..."
+fi
 
 # -----------------------------------------------------------------------------
 # wandb setup
