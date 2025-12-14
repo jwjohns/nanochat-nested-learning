@@ -1,0 +1,3 @@
+{"task": "json_format", "turns": ["Answer in strict JSON: {'answer': string}", "What is the capital of France?", "What is 2+2?", "Who wrote Hamlet?"]}
+{"task": "terse_style", "turns": ["Be extremely terse. 1 sentence max.", "Explain quantum physics.", "Explain photosynthesis."]}
+{"task": "pattern", "turns": ["Mapping: cat->dax, dog->bix, bird->?"]}

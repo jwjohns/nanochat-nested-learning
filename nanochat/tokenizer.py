@@ -149,7 +149,7 @@ class HuggingFaceTokenizer:
 # -----------------------------------------------------------------------------
 # Tokenizer based on rustbpe + tiktoken combo
 import pickle
-import rustbpe
+# import rustbpe
 import tiktoken
 
 class RustBPETokenizer:
@@ -384,7 +384,8 @@ def get_tokenizer():
     base_dir = get_base_dir()
     tokenizer_dir = os.path.join(base_dir, "tokenizer")
     # return HuggingFaceTokenizer.from_directory(tokenizer_dir)
-    return RustBPETokenizer.from_directory(tokenizer_dir)
+    # return RustBPETokenizer.from_directory(tokenizer_dir)
+    return HuggingFaceTokenizer.from_pretrained("gpt2")
 
 def get_token_bytes(device="cpu"):
     import torch

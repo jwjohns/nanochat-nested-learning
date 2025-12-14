@@ -23,6 +23,13 @@ from nanochat.common import get_dist_info, print0
 from nanochat.muon import Muon, DistMuon
 from nanochat.adamw import DistAdamW
 
+
+try:
+    import transformer_engine.pytorch as te
+    HAVE_TE = True
+except ImportError:
+    HAVE_TE = False
+
 @dataclass
 class GPTConfig:
     sequence_len: int = 1024
@@ -31,6 +38,7 @@ class GPTConfig:
     n_head: int = 6 # number of query heads
     n_kv_head: int = 6 # number of key/value heads (GQA)
     n_embd: int = 768
+    use_transformer_engine: bool = False
 
 
 def norm(x):
@@ -58,10 +66,11 @@ class CausalSelfAttention(nn.Module):
         self.head_dim = self.n_embd // self.n_head
         assert self.n_embd % self.n_head == 0
         assert self.n_kv_head <= self.n_head and self.n_head % self.n_kv_head == 0
-        self.c_q = nn.Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
-        self.c_k = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_v = nn.Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
-        self.c_proj = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        Linear = te.Linear if (HAVE_TE and config.use_transformer_engine) else nn.Linear
+        self.c_q = Linear(self.n_embd, self.n_head * self.head_dim, bias=False)
+        self.c_k = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_v = Linear(self.n_embd, self.n_kv_head * self.head_dim, bias=False)
+        self.c_proj = Linear(self.n_embd, self.n_embd, bias=False)
 
     def forward(self, x, cos_sin, kv_cache):
         B, T, C = x.size()
@@ -112,8 +121,9 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=False)
-        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=False)
+        Linear = te.Linear if (HAVE_TE and config.use_transformer_engine) else nn.Linear
+        self.c_fc = Linear(config.n_embd, 4 * config.n_embd, bias=False)
+        self.c_proj = Linear(4 * config.n_embd, config.n_embd, bias=False)
 
     def forward(self, x):
         x = self.c_fc(x)
@@ -138,6 +148,7 @@ class GPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
+        self.inner_learner = None
         self.transformer = nn.ModuleDict({
             "wte": nn.Embedding(config.vocab_size, config.n_embd),
             "h": nn.ModuleList([Block(config, layer_idx) for layer_idx in range(config.n_layer)]),
@@ -240,7 +251,7 @@ class GPT(nn.Module):
                 group["initial_lr"] = group["lr"]
         return optimizers
 
-    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean'):
+    def forward(self, idx, targets=None, kv_cache=None, loss_reduction='mean', return_hidden=False):
         B, T = idx.size()
 
         # Grab the rotary embeddings for the current sequence length (they are of shape (1, seq_len, 1, head_dim/2))
@@ -258,19 +269,27 @@ class GPT(nn.Module):
             x = block(x, cos_sin, kv_cache)
         x = norm(x)
 
+        if self.inner_learner is not None:
+            x = self.inner_learner.apply(x)
+
         # Forward the lm_head (compute logits)
         softcap = 15 # smoothly cap the logits to the range [-softcap, softcap]
-        logits = self.lm_head(x) # (B, T, vocab_size) <- very big tensor, large amount of memory
-        logits = logits.float() # switch to fp32 for logit softcap and loss computation
-        logits = softcap * torch.tanh(logits / softcap) # squash the logits
-
         if targets is not None:
             # training: given the targets, compute and return the loss
+            logits = self.lm_head(x) # (B, T, vocab_size) <- very big tensor, large amount of memory
+            logits = logits.float() # switch to fp32 for logit softcap and loss computation
+            logits = softcap * torch.tanh(logits / softcap) # squash the logits
             # TODO experiment with chunked cross-entropy?
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1, reduction=loss_reduction)
             return loss
         else:
-            # inference: just return the logits directly
+            # inference mode: compute and return the logits
+            logits = self.lm_head(x) # (B, T, vocab_size)
+            logits = logits.float() # switch to fp32 for logit softcap
+            logits = softcap * torch.tanh(logits / softcap) # logits softcap
+            
+            if return_hidden:
+                return logits, x
             return logits
 
     @torch.inference_mode()

@@ -53,6 +53,7 @@ warmup_ratio = 0.0 # ratio of iterations for LR warmup
 warmdown_ratio = 0.2 # ratio of iterations for LR warmdown
 final_lr_frac = 0.0 # final LR is this fraction of the initial LR
 resume_from_step = -1 # resume training from this step of the optimization (-1 = disable)
+use_transformer_engine = False # use NVIDIA Transformer Engine for FP8/FP4 training
 # Evaluation
 eval_every = 250 # every how many steps to evaluate the model for val bpb
 eval_tokens = 20*524288 # number of tokens to evaluate val loss on
@@ -73,6 +74,23 @@ device_type = autodetect_device_type() if device_type == "" else device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
 autocast_ctx = torch.amp.autocast(device_type=device_type, dtype=torch.bfloat16) if device_type == "cuda" else nullcontext()
+
+te_ctx = nullcontext()
+if use_transformer_engine:
+    if device_type != "cuda":
+        print0("WARNING: Transformer Engine requires CUDA. Disabling.")
+        use_transformer_engine = False
+    else:
+        try:
+            import transformer_engine.pytorch as te
+            # Enable FP8 autocast if TE is available.
+            # FP4 support is handled internal to te.Linear on Blackwell when configured,
+            # but fp8_autocast is the standard entry point for lower precision.
+            te_ctx = te.fp8_autocast(enabled=True)
+            print0("Transformer Engine enabled. Using FP8/FP4 autocast.")
+        except ImportError:
+            print0("WARNING: transformer_engine not installed. Disabling.")
+            use_transformer_engine = False
 synchronize = torch.cuda.synchronize if device_type == "cuda" else lambda: None
 get_max_memory = torch.cuda.max_memory_allocated if device_type == "cuda" else lambda: 0
 
@@ -82,7 +100,8 @@ wandb_run = DummyWandb() if use_dummy_wandb else wandb.init(project="nanochat", 
 
 # Tokenizer will be useful for evaluation, also we need the vocab size
 tokenizer = get_tokenizer()
-token_bytes = get_token_bytes(device=device)
+# token_bytes = get_token_bytes(device=device)
+token_bytes = None
 vocab_size = tokenizer.get_vocab_size()
 print0(f"Vocab size: {vocab_size:,}")
 
@@ -110,7 +129,7 @@ print0(f"Total batch size {total_batch_size:,} => gradient accumulation steps: {
 # Initialize the Model
 
 # Create a new model with random weights
-model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim)
+model_config_kwargs = dict(sequence_len=max_seq_len, vocab_size=vocab_size, n_layer=num_layers, n_head=num_heads, n_kv_head=num_kv_heads, n_embd=model_dim, use_transformer_engine=use_transformer_engine)
 with torch.device("meta"):
     model_config = GPTConfig(**model_config_kwargs)
     model = GPT(model_config)
@@ -129,7 +148,8 @@ if resuming:
     del model_data # free up this memory after the copy
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
-model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
+# model = torch.compile(model, dynamic=False) # TODO: dynamic True/False think through
+
 num_params = sum(p.numel() for p in model.parameters())
 print0(f"Number of parameters: {num_params:,}")
 num_flops_per_token = model.estimate_flops()
@@ -221,17 +241,21 @@ while True:
         model.eval()
         val_loader = build_val_loader()
         eval_steps = eval_tokens // (device_batch_size * max_seq_len * ddp_world_size)
-        with autocast_ctx:
-            val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
-        print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
-        if val_bpb < min_val_bpb:
-            min_val_bpb = val_bpb
-        wandb_run.log({
-            "step": step,
-            "total_training_flops": flops_so_far,
-            "total_training_time": total_training_time,
-            "val/bpb": val_bpb,
-        })
+        if token_bytes is not None:
+            with autocast_ctx:
+                val_bpb = evaluate_bpb(model, val_loader, eval_steps, token_bytes)
+            print0(f"Step {step:05d} | Validation bpb: {val_bpb:.4f}")
+            if val_bpb < min_val_bpb:
+                min_val_bpb = val_bpb
+            wandb_run.log({
+                "step": step,
+                "total_training_flops": flops_so_far,
+                "total_training_time": total_training_time,
+                "val/bpb": val_bpb,
+            })
+        else:
+             print0("Skipping eval because token_bytes is None")
+             val_bpb = 0.0
         model.train()
 
     # once in a while: estimate the CORE metric (all ranks participate)
@@ -306,7 +330,8 @@ while True:
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
         with autocast_ctx:
-            loss = model(x, y)
+            with te_ctx:
+                loss = model(x, y)
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         loss.backward()

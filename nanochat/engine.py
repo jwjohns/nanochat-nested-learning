@@ -259,10 +259,26 @@ class Engine:
                 first_iteration = False
             else:
                 # Forward the model and get the next token for each row
-                logits = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size)
+                # We need the hidden state for the inner learner update
+                if self.model.inner_learner is not None:
+                     logits, hidden = self.model.forward(ids, kv_cache=kv_cache_decode, return_hidden=True)
+                     h_t = hidden[:, -1, :] # (B, C)
+                else:
+                     logits = self.model.forward(ids, kv_cache=kv_cache_decode)  # (B, T, vocab_size)
+                
                 logits = logits[:, -1, :]  # (B, vocab_size) at last time step
                 next_ids = sample_next_token(logits, rng, temperature, top_k)  # (B, 1)
                 sampled_tokens = next_ids[:, 0].tolist()
+                
+                # Update inner learner if active
+                if self.model.inner_learner is not None:
+                    # We use the logits and sampled token for the update
+                    # For simplicity, we only update using the first sample in batch if B > 1
+                    # But here B corresponds to num_samples (parallel generations)
+                    # We broadcast the update signal from the sampled tokens
+                    # Note: This means all parallel samples share the same inner learner state update
+                    # which is consistent with "batch size 1" constraint initially or shared context
+                    self.model.inner_learner.update(h_t, logits, next_ids[:, 0])
 
             # Process each row: choose the next token, update state, optional tool use
             token_column = [] # contains the next token id along each row

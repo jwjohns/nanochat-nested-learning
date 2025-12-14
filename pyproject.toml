@@ -65,7 +65,8 @@ cpu = [
     "torch>=2.8.0",  
 ]  
 gpu = [  
-    "torch>=2.8.0",  
+    "torch>=2.8.0",
+    "transformer_engine>=1.7",
 ]  
   
 [tool.uv]  

@@ -10,6 +10,7 @@ from nanochat.common import compute_init, autodetect_device_type
 from contextlib import nullcontext
 from nanochat.engine import Engine
 from nanochat.checkpoint_manager import load_model
+from nanochat.inner_learner import InnerLearner
 
 parser = argparse.ArgumentParser(description='Chat with the model')
 parser.add_argument('-i', '--source', type=str, default="sft", help="Source of the model: sft|mid|rl")
@@ -20,6 +21,12 @@ parser.add_argument('-t', '--temperature', type=float, default=0.6, help='Temper
 parser.add_argument('-k', '--top-k', type=int, default=50, help='Top-k sampling parameter')
 parser.add_argument('--device-type', type=str, default='', choices=['cuda', 'cpu', 'mps'], help='Device type for evaluation: cuda|cpu|mps. empty => autodetect')
 parser.add_argument('-d', '--dtype', type=str, default='bfloat16', choices=['float32', 'bfloat16'])
+# Inner Learner args
+parser.add_argument('--inner-learn', action='store_true', help='Enable inner learner')
+parser.add_argument('--inner-lr', type=float, default=0.01, help='Inner learner learning rate')
+parser.add_argument('--inner-decay', type=float, default=0.999, help='Inner learner decay')
+parser.add_argument('--inner-clip', type=float, default=1.0, help='Inner learner gradient clip')
+parser.add_argument('--inner-reset', type=str, default='conversation', choices=['conversation', 'turn', 'never'], help='Inner learner reset policy')
 args = parser.parse_args()
 
 # Init the model and tokenizer
@@ -34,6 +41,20 @@ model, tokenizer, meta = load_model(args.source, device, phase="eval", model_tag
 bos = tokenizer.get_bos_token_id()
 user_start, user_end = tokenizer.encode_special("<|user_start|>"), tokenizer.encode_special("<|user_end|>")
 assistant_start, assistant_end = tokenizer.encode_special("<|assistant_start|>"), tokenizer.encode_special("<|assistant_end|>")
+
+# Init InnerLearner if enabled
+inner_learner = None
+if args.inner_learn:
+    inner_learner = InnerLearner(
+        model.config, 
+        device, 
+        dtype=ptdtype,
+        lr=args.inner_lr,
+        decay=args.inner_decay,
+        clip=args.inner_clip
+    )
+    model.inner_learner = inner_learner
+    print(f"Inner Learner enabled (lr={args.inner_lr}, decay={args.inner_decay}, reset={args.inner_reset})")
 
 # Create Engine for efficient generation
 engine = Engine(model, tokenizer)
@@ -66,11 +87,18 @@ while True:
 
     if user_input.lower() == 'clear':
         conversation_tokens = [bos]
+        if inner_learner is not None and args.inner_reset == 'conversation':
+             inner_learner.reset()
+             print("Inner learner state reset.")
         print("Conversation cleared.")
         continue
 
     if not user_input:
         continue
+
+    # Reset per turn if configured
+    if inner_learner is not None and args.inner_reset == 'turn':
+        inner_learner.reset()
 
     # Add User message to the conversation
     conversation_tokens.append(user_start)
